@@ -1,0 +1,449 @@
+<!doctype html>
+<!-- PROTOTYPE - NOT FOR PRODUCTION: Nap Cats playable ad / concept test -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<title>Nap Cats: Logic Rooms</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #fff4e6; overflow: hidden; touch-action: none;
+    -webkit-user-select: none; user-select: none; -webkit-tap-highlight-color: transparent; }
+  canvas { display: block; position: absolute; left: 0; top: 0; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<script>
+/* Nap Cats: Logic Rooms - playable prototype (PROTOTYPE - NOT FOR PRODUCTION)
+ * Rules: one cat per row, per column and per colored room; cats never touch, not even diagonally.
+ * Query flags: ?demo=1 scripted autoplay (for ad capture), ?cap=1 manual clock via window.__advance(dt).
+ * Debug: window.__game  (state, solve(), level(n)).
+ */
+(() => {
+'use strict';
+const Q = new URLSearchParams(location.search);
+const DEMO = Q.has('demo'), CAP = Q.has('cap');
+const W = 540, H = 960;                          // logical portrait canvas
+const cv = document.getElementById('c'); let cx = cv.getContext('2d');
+let scale = 1, offX = 0, offY = 0;
+
+/* ---------- config (gameplay values in one place) ---------- */
+const CFG = {
+  levels: [ { n: 5, seed: 11 }, { n: 6, seed: 7 }, { n: 7, seed: 5 } ],
+  hearts: 3,
+  storeUrl: 'https://ketchsoft.github.io/orbit-lock/nap-cats/',
+  rooms: ['#ffd6a5', '#caffbf', '#9bf6ff', '#bdb2ff', '#ffc6ff', '#fdffb6', '#ffadad', '#a0c4ff'],
+  roomInk: ['#e8a25c', '#6fbf63', '#3fb6c9', '#8a7ae0', '#d77fd7', '#c9c43f', '#e06b6b', '#5d8fe0'],
+  furs: [['#f5a35b', '#d9772f'], ['#9aa3ad', '#6f7882'], ['#3b3b46', '#24242c'], ['#fff8ef', '#e3d6c4'],
+         ['#e8c79a', '#c49a62'], ['#f0e0d0', '#7b5b45'], ['#ffb3c7', '#e0809c'], ['#c4b5a0', '#8d7a63']],
+};
+
+/* ---------- seeded RNG + generator ---------- */
+function rng(seed) { let s = seed >>> 0 || 1; return () => (s = (s * 1664525 + 1013904223) >>> 0) / 4294967296; }
+
+function countSolutions(n, reg, cap) {
+  const col = new Array(n).fill(false), room = new Array(n).fill(false), pos = [];
+  let count = 0;
+  (function row(r) {
+    if (count >= cap) return;
+    if (r === n) { count++; return; }
+    for (let c = 0; c < n; c++) {
+      if (col[c] || room[reg[r][c]]) continue;
+      if (r > 0 && Math.abs(pos[r - 1] - c) <= 1) continue;
+      col[c] = room[reg[r][c]] = true; pos[r] = c;
+      row(r + 1);
+      col[c] = room[reg[r][c]] = false;
+    }
+  })(0);
+  return count;
+}
+
+function generate(n, seed) {
+  const R = rng(seed);
+  for (let attempt = 0; attempt < 4000; attempt++) {
+    // solution: permutation with no adjacent cats in consecutive rows
+    let sol = null;
+    for (let t = 0; t < 200 && !sol; t++) {
+      const p = [], used = new Array(n).fill(false);
+      let ok = true;
+      for (let r = 0; r < n && ok; r++) {
+        const opts = [];
+        for (let c = 0; c < n; c++) if (!used[c] && (r === 0 || Math.abs(p[r - 1] - c) > 1)) opts.push(c);
+        if (!opts.length) { ok = false; break; }
+        const c = opts[Math.floor(R() * opts.length)]; p.push(c); used[c] = true;
+      }
+      if (ok) sol = p;
+    }
+    if (!sol) continue;
+    // rooms: random flood fill grown from each cat
+    const reg = Array.from({ length: n }, () => new Array(n).fill(-1));
+    const fronts = sol.map((c, r) => { reg[r][c] = r; return [[r, c]]; });
+    let left = n * n - n;
+    while (left > 0) {
+      const k = Math.floor(R() * n), f = fronts[k];
+      if (!f.length) continue;
+      const [r, c] = f[Math.floor(R() * f.length)];
+      const nb = [[r + 1, c], [r - 1, c], [r, c + 1], [r, c - 1]].filter(([a, b]) => a >= 0 && b >= 0 && a < n && b < n && reg[a][b] < 0);
+      if (!nb.length) { f.splice(f.findIndex(q => q[0] === r && q[1] === c), 1); continue; }
+      const [a, b] = nb[Math.floor(R() * nb.length)];
+      reg[a][b] = k; f.push([a, b]); left--;
+    }
+    // hill-climb: move boundary cells between rooms until the solution is unique
+    let cnt = countSolutions(n, reg, 60);
+    for (let it = 0; it < 3000 && cnt > 1; it++) {
+      const r = Math.floor(R() * n), c = Math.floor(R() * n), from = reg[r][c];
+      if (sol[r] === c) continue;                       // never move a cat's own cell
+      const nb = [[r + 1, c], [r - 1, c], [r, c + 1], [r, c - 1]].filter(([a, b]) => a >= 0 && b >= 0 && a < n && b < n && reg[a][b] !== from);
+      if (!nb.length) continue;
+      const [a, b] = nb[Math.floor(R() * nb.length)]; const to = reg[a][b];
+      reg[r][c] = to;
+      if (!connected(n, reg, from)) { reg[r][c] = from; continue; }
+      const k = countSolutions(n, reg, 60);
+      if (k >= 1 && k <= cnt) cnt = k; else reg[r][c] = from;
+    }
+    if (cnt === 1) return { n, reg, sol };
+  }
+  throw new Error('generator failed');
+}
+
+function connected(n, reg, id) {
+  let start = null, total = 0;
+  for (let r = 0; r < n; r++) for (let c = 0; c < n; c++) if (reg[r][c] === id) { total++; if (!start) start = [r, c]; }
+  if (!start) return false;
+  const seen = new Set([start[0] * n + start[1]]), st = [start];
+  while (st.length) { const [r, c] = st.pop();
+    for (const [a, b] of [[r + 1, c], [r - 1, c], [r, c + 1], [r, c - 1]])
+      if (a >= 0 && b >= 0 && a < n && b < n && reg[a][b] === id && !seen.has(a * n + b)) { seen.add(a * n + b); st.push([a, b]); } }
+  return seen.size === total;
+}
+
+/* ---------- audio (synthesized, no assets) ---------- */
+let AC = null;
+function audio() { if (!AC) { try { AC = new (window.AudioContext || window.webkitAudioContext)(); } catch (e) {} } if (AC && AC.state === 'suspended') AC.resume(); return AC; }
+function tone(type, f0, f1, dur, vol, delay = 0, lp = 0) {
+  const a = AC; if (!a || CAP) return;
+  const t = a.currentTime + delay, o = a.createOscillator(), g = a.createGain();
+  o.type = type; o.frequency.setValueAtTime(f0, t); o.frequency.exponentialRampToValueAtTime(f1, t + dur);
+  g.gain.setValueAtTime(0.0001, t); g.gain.exponentialRampToValueAtTime(vol, t + 0.02); g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+  let node = o;
+  if (lp) { const fl = a.createBiquadFilter(); fl.type = 'lowpass'; fl.frequency.value = lp; o.connect(fl); node = fl; }
+  node.connect(g); g.connect(a.destination); o.start(t); o.stop(t + dur + 0.05);
+}
+const sfx = {
+  meow(p = 1) { tone('sawtooth', 520 * p, 900 * p, 0.14, 0.12, 0, 1800); tone('sawtooth', 900 * p, 480 * p, 0.26, 0.11, 0.13, 1500); },
+  mark() { tone('sine', 900, 700, 0.06, 0.05); },
+  error() { tone('square', 180, 120, 0.25, 0.08, 0, 900); },
+  win() { [523, 659, 784, 1047].forEach((f, i) => tone('triangle', f, f, 0.22, 0.12, i * 0.09)); },
+};
+function buzz(ms) { if (navigator.vibrate && !CAP) try { navigator.vibrate(ms); } catch (e) {} }
+
+/* ---------- state ---------- */
+const S = { li: 0, lvl: null, cell: 0, bx: 0, by: 0, cats: [], marks: [], hearts: CFG.hearts, phase: 'play',
+            phaseT: 0, shake: 0, fx: [], t: 0, hint: null, tutorial: true, moves: 0, flash: [] };
+
+function loadLevel(i) {
+  S.li = i; const L = CFG.levels[i]; S.lvl = generate(L.n, L.seed);
+  const n = S.lvl.n;
+  S.cats = []; S.marks = Array.from({ length: n }, () => new Array(n).fill(0)); // 0 free, 1 auto-blocked, 2 wrong
+  S.hearts = CFG.hearts; S.phase = 'intro'; S.phaseT = S.t; S.fx = []; S.flash = []; S.hint = null;
+  S.cell = Math.floor(Math.min(440 / n, 86)); S.bx = (W - S.cell * n) / 2; S.by = 256 + (450 - S.cell * n) / 2;
+  S.tutorial = i === 0;
+}
+
+function catAt(r, c) { return S.cats.find(k => k.r === r && k.c === c); }
+
+function tapCell(r, c) {
+  if (S.phase !== 'play') return;
+  const n = S.lvl.n;
+  if (catAt(r, c) || S.marks[r][c]) { sfx.mark(); return; }
+  S.moves++;
+  (window.__events = window.__events || []).push({ t: +S.t.toFixed(3), level: S.li + 1, ok: S.lvl.sol[r] === c, r, c });
+  if (S.lvl.sol[r] === c) {
+    S.cats.push({ r, c, t: S.t, fur: CFG.furs[(r * 3 + c) % CFG.furs.length] });
+    sfx.meow(0.9 + ((r + c) % 4) * 0.08); buzz(15);
+    const room = S.lvl.reg[r][c];
+    for (let a = 0; a < n; a++) for (let b = 0; b < n; b++) {
+      if ((a === r || b === c || (Math.abs(a - r) <= 1 && Math.abs(b - c) <= 1) || S.lvl.reg[a][b] === room) && !(a === r && b === c) && !S.marks[a][b])
+        { S.marks[a][b] = 1; S.flash.push({ r: a, c: b, t: S.t + 0.02 * (Math.abs(a - r) + Math.abs(b - c)) }); }
+    }
+    burst(r, c, 8, CFG.roomInk[room]);
+    S.tutorial = false; S.hint = null;
+    if (S.cats.length === n) { S.phase = 'win'; S.phaseT = S.t; sfx.win(); buzz([20, 40, 20]);
+      for (const k of S.cats) burst(k.r, k.c, 14, '#ffb703'); }
+  } else {
+    S.marks[r][c] = 2; S.hearts--; S.shake = S.t; sfx.error(); buzz(80);
+    if (S.hearts <= 0) { S.phase = 'fail'; S.phaseT = S.t; }
+  }
+}
+
+function useHint() {
+  if (S.phase !== 'play') return;
+  const n = S.lvl.n;
+  for (let r = 0; r < n; r++) if (!catAt(r, S.lvl.sol[r])) { S.hint = { r, c: S.lvl.sol[r], t: S.t }; return; }
+}
+
+function burst(r, c, k, color) {
+  const [x, y] = cellCenter(r, c);
+  for (let i = 0; i < k; i++) { const a = Math.random() * Math.PI * 2, v = 120 + Math.random() * 220;
+    S.fx.push({ x, y, vx: Math.cos(a) * v, vy: Math.sin(a) * v - 120, t: S.t, life: 0.7 + Math.random() * 0.4, color, kind: i % 3 ? 'dot' : 'heart' }); }
+}
+function cellCenter(r, c) { return [S.bx + (c + 0.5) * S.cell, S.by + (r + 0.5) * S.cell]; }
+
+/* ---------- drawing helpers ---------- */
+const ease = { out: x => 1 - Math.pow(1 - x, 3), back: x => { const c1 = 1.9, c3 = c1 + 1; return 1 + c3 * Math.pow(x - 1, 3) + c1 * Math.pow(x - 1, 2); } };
+const clamp = (x, a = 0, b = 1) => Math.max(a, Math.min(b, x));
+function rr(x, y, w, h, r) { cx.beginPath(); cx.roundRect ? cx.roundRect(x, y, w, h, r) : cx.rect(x, y, w, h); }
+function heartPath(x, y, s) { cx.beginPath(); cx.moveTo(x, y + s * 0.3);
+  cx.bezierCurveTo(x, y - s * 0.1, x - s * 0.55, y - s * 0.1, x - s * 0.55, y + s * 0.25);
+  cx.bezierCurveTo(x - s * 0.55, y + s * 0.55, x - s * 0.15, y + s * 0.75, x, y + s * 0.9);
+  cx.bezierCurveTo(x + s * 0.15, y + s * 0.75, x + s * 0.55, y + s * 0.55, x + s * 0.55, y + s * 0.25);
+  cx.bezierCurveTo(x + s * 0.55, y - s * 0.1, x, y - s * 0.1, x, y + s * 0.3); cx.closePath(); }
+
+function drawCat(x, y, s, fur, awake, bob) {
+  const [f, d] = fur; cx.save(); cx.translate(x, y + bob); cx.scale(s / 100, s / 100);
+  // tail
+  cx.strokeStyle = d; cx.lineWidth = 11; cx.lineCap = 'round';
+  cx.beginPath(); cx.moveTo(30, 28); cx.quadraticCurveTo(52, 30, 44, 4); cx.stroke();
+  // body (curled loaf)
+  cx.fillStyle = f; cx.strokeStyle = d; cx.lineWidth = 4;
+  cx.beginPath(); cx.ellipse(4, 22, 38, 22, 0, 0, Math.PI * 2); cx.fill(); cx.stroke();
+  // ears
+  cx.beginPath(); cx.moveTo(-30, -14); cx.lineTo(-24, -42); cx.lineTo(-8, -24); cx.closePath(); cx.fill(); cx.stroke();
+  cx.beginPath(); cx.moveTo(10, -24); cx.lineTo(24, -42); cx.lineTo(30, -14); cx.closePath(); cx.fill(); cx.stroke();
+  cx.fillStyle = '#ffb4c2';
+  cx.beginPath(); cx.moveTo(-25, -18); cx.lineTo(-22, -34); cx.lineTo(-14, -24); cx.closePath(); cx.fill();
+  cx.beginPath(); cx.moveTo(14, -24); cx.lineTo(22, -34); cx.lineTo(25, -18); cx.closePath(); cx.fill();
+  // head
+  cx.fillStyle = f; cx.beginPath(); cx.ellipse(0, -4, 32, 27, 0, 0, Math.PI * 2); cx.fill(); cx.stroke();
+  // face
+  const ink = f === '#3b3b46' ? '#f3e7d3' : '#3a2a22';
+  cx.strokeStyle = ink; cx.fillStyle = ink; cx.lineWidth = 3.5;
+  if (awake) { cx.beginPath(); cx.arc(-12, -6, 4.5, 0, Math.PI * 2); cx.arc(12, -6, 4.5, 0, Math.PI * 2); cx.fill(); }
+  else { cx.beginPath(); cx.arc(-12, -8, 6, 0.15 * Math.PI, 0.85 * Math.PI); cx.stroke(); cx.beginPath(); cx.arc(12, -8, 6, 0.15 * Math.PI, 0.85 * Math.PI); cx.stroke(); }
+  cx.fillStyle = '#ff8fa3'; cx.beginPath(); cx.moveTo(-4, 2); cx.lineTo(4, 2); cx.lineTo(0, 6); cx.closePath(); cx.fill();
+  cx.strokeStyle = ink; cx.lineWidth = 2.5; cx.beginPath(); cx.moveTo(0, 6); cx.quadraticCurveTo(-5, 12, -9, 8); cx.moveTo(0, 6); cx.quadraticCurveTo(5, 12, 9, 8); cx.stroke();
+  cx.lineWidth = 1.8; cx.globalAlpha = 0.7;
+  cx.beginPath(); cx.moveTo(-18, 4); cx.lineTo(-38, 0); cx.moveTo(-18, 8); cx.lineTo(-38, 10); cx.moveTo(18, 4); cx.lineTo(38, 0); cx.moveTo(18, 8); cx.lineTo(38, 10); cx.stroke();
+  cx.globalAlpha = 1;
+  // blush
+  cx.fillStyle = 'rgba(255,120,150,0.35)'; cx.beginPath(); cx.ellipse(-20, 4, 6, 4, 0, 0, Math.PI * 2); cx.ellipse(20, 4, 6, 4, 0, 0, Math.PI * 2); cx.fill();
+  cx.restore();
+}
+
+function hand(x, y, press) {
+  cx.save(); cx.translate(x, y); cx.rotate(-0.35); const s = press ? 0.88 : 1; cx.scale(s, s);
+  cx.fillStyle = '#fff'; cx.strokeStyle = '#3a2a22'; cx.lineWidth = 4;
+  rr(-11, -6, 22, 40, 11); cx.fill(); cx.stroke();              // index finger
+  rr(-26, 22, 52, 46, 18); cx.fill(); cx.stroke();              // palm
+  cx.restore();
+  if (press) { cx.strokeStyle = 'rgba(255,255,255,0.9)'; cx.lineWidth = 4; cx.beginPath(); cx.arc(x, y - 8, 26, 0, Math.PI * 2); cx.stroke(); }
+}
+
+function text(str, x, y, size, color, weight = 900, align = 'center') {
+  cx.font = `${weight} ${size}px "Avenir Next", "Nunito", "Trebuchet MS", system-ui, sans-serif`;
+  cx.textAlign = align; cx.textBaseline = 'middle'; cx.fillStyle = color; cx.fillText(str, x, y);
+}
+function button(label, x, y, w, h, bg, fg, t) {
+  const p = 1 + Math.sin(t * 5) * 0.03; cx.save(); cx.translate(x, y); cx.scale(p, p);
+  cx.fillStyle = 'rgba(120,60,20,0.25)'; rr(-w / 2, -h / 2 + 7, w, h, h / 2); cx.fill();
+  cx.fillStyle = bg; rr(-w / 2, -h / 2, w, h, h / 2); cx.fill();
+  text(label, 0, 2, h * 0.42, fg); cx.restore();
+}
+
+/* ---------- render ---------- */
+const UI = { hint: { x: 450, y: 760, w: 120, h: 56 }, cta: { x: 270, y: 780, w: 330, h: 92 }, retry: { x: 270, y: 660, w: 260, h: 70 } };
+
+function render() {
+  const t = S.t, n = S.lvl.n, cs = S.cell;
+  cx.setTransform(1, 0, 0, 1, 0, 0); cx.fillStyle = '#fff4e6'; cx.fillRect(0, 0, cv.width, cv.height);
+  cx.setTransform(scale, 0, 0, scale, offX, offY);
+  // background
+  const g = cx.createLinearGradient(0, 0, 0, H); g.addColorStop(0, '#ffe8cc'); g.addColorStop(1, '#ffd1dc');
+  cx.fillStyle = g; cx.fillRect(-200, -200, W + 400, H + 400);
+  cx.fillStyle = 'rgba(255,255,255,0.35)';
+  for (let i = 0; i < 9; i++) { const px = (i * 137 + t * 8) % (W + 80) - 40, py = 120 + (i * 211) % 760;
+    cx.save(); cx.translate(px, py); cx.globalAlpha = 0.5; heartPath(0, 0, 18 + (i % 3) * 8); cx.fill(); cx.restore(); }
+  cx.globalAlpha = 1;
+
+  // header
+  text('NAP CATS', W / 2, 70, 46, '#7a3e1d');
+  text('Logic Rooms', W / 2, 108, 22, '#b06a3b', 800);
+  cx.fillStyle = '#ffffffcc'; rr(30, 140, 150, 52, 26); cx.fill(); text(`LEVEL ${S.li + 1}`, 105, 167, 24, '#7a3e1d');
+  for (let i = 0; i < CFG.hearts; i++) {
+    const on = i < S.hearts, hx = 400 + i * 44, sh = !on && t - S.shake < 0.4 && i === S.hearts ? Math.sin((t - S.shake) * 60) * 4 : 0;
+    cx.fillStyle = on ? '#ff4d6d' : 'rgba(122,62,29,0.2)'; heartPath(hx + sh, 148, 38); cx.fill();
+  }
+  // rule line
+  const rule = S.phase === 'fail' ? 'Out of lives!' : 'One cat per row, column & room. No touching!';
+  text(rule, W / 2, 222, 19, '#7a3e1d', 800);
+
+  // board
+  const sk = t - S.shake < 0.35 ? Math.sin((t - S.shake) * 70) * 7 * (1 - (t - S.shake) / 0.35) : 0;
+  const intro = S.phase === 'intro' ? clamp((t - S.phaseT) / 0.5) : 1;
+  cx.save(); cx.translate(S.bx + sk + (cs * n) / 2, S.by + (cs * n) / 2);
+  const bs = 0.7 + 0.3 * ease.back(intro); cx.scale(bs, bs); cx.globalAlpha = clamp(intro * 1.5);
+  cx.translate(-(cs * n) / 2, -(cs * n) / 2);
+  cx.fillStyle = 'rgba(122,62,29,0.18)'; rr(-14, -6, cs * n + 28, cs * n + 28, 26); cx.fill();
+  cx.fillStyle = '#fffaf3'; rr(-14, -14, cs * n + 28, cs * n + 28, 26); cx.fill();
+  for (let r = 0; r < n; r++) for (let c = 0; c < n; c++) {
+    const room = S.lvl.reg[r][c], x = c * cs, y = r * cs;
+    cx.fillStyle = CFG.rooms[room % CFG.rooms.length]; cx.fillRect(x, y, cs, cs);
+    cx.strokeStyle = 'rgba(122,62,29,0.12)'; cx.lineWidth = 1; cx.strokeRect(x + 0.5, y + 0.5, cs - 1, cs - 1);
+    const m = S.marks[r][c];
+    if (m === 1) {
+      const fl = S.flash.find(f => f.r === r && f.c === c), k = fl ? clamp((t - fl.t) / 0.25) : 1;
+      if (k > 0) { cx.fillStyle = `rgba(122,62,29,${0.22 * k})`; cx.beginPath(); cx.arc(x + cs / 2, y + cs / 2, cs * 0.09 * (0.5 + k * 0.5), 0, Math.PI * 2); cx.fill(); }
+    } else if (m === 2) {
+      cx.strokeStyle = '#e63946'; cx.lineWidth = cs * 0.08; cx.lineCap = 'round'; const q = cs * 0.28;
+      cx.beginPath(); cx.moveTo(x + q, y + q); cx.lineTo(x + cs - q, y + cs - q); cx.moveTo(x + cs - q, y + q); cx.lineTo(x + q, y + cs - q); cx.stroke();
+    }
+  }
+  // room walls
+  cx.strokeStyle = '#7a3e1d'; cx.lineWidth = 4; cx.lineCap = 'round'; cx.beginPath();
+  for (let r = 0; r < n; r++) for (let c = 0; c < n; c++) {
+    const a = S.lvl.reg[r][c];
+    if (c < n - 1 && S.lvl.reg[r][c + 1] !== a) { cx.moveTo((c + 1) * cs, r * cs); cx.lineTo((c + 1) * cs, (r + 1) * cs); }
+    if (r < n - 1 && S.lvl.reg[r + 1][c] !== a) { cx.moveTo(c * cs, (r + 1) * cs); cx.lineTo((c + 1) * cs, (r + 1) * cs); }
+  }
+  cx.stroke(); cx.lineWidth = 6; rr(0, 0, cs * n, cs * n, 6); cx.stroke();
+  // cats
+  for (const k of S.cats) {
+    const a = clamp((t - k.t) / 0.35), x = (k.c + 0.5) * cs, y = (k.r + 0.55) * cs;
+    const winHop = S.phase === 'win' ? Math.abs(Math.sin((t - S.phaseT) * 8 + k.c)) * -cs * 0.15 : 0;
+    drawCat(x, y, cs * 0.78 * ease.back(a), k.fur, S.phase === 'win', winHop);
+    if (S.phase !== 'win' && a >= 1) { const z = (t * 0.6 + k.r * 0.3) % 1; cx.globalAlpha = 1 - z; text('z', x + cs * 0.3 + z * 10, y - cs * 0.35 - z * 18, cs * 0.2, '#7a3e1d'); cx.globalAlpha = 1; }
+  }
+  cx.restore();
+
+  // hint glow / tutorial hand
+  let target = S.hint;
+  if (!target && S.tutorial && S.phase === 'play' && !DEMO) {
+    // point at the smallest room's solution cell
+    const size = new Array(n).fill(0); for (const row of S.lvl.reg) for (const v of row) size[v]++;
+    const room = size.indexOf(Math.min(...size)); const r = S.lvl.sol.findIndex((c, rr) => S.lvl.reg[rr][c] === room);
+    target = { r, c: S.lvl.sol[r], t: S.phaseT };
+  }
+  if (target) {
+    const [x, y] = cellCenter(target.r, target.c), p = (t - target.t) % 1.2;
+    cx.strokeStyle = '#ffb703'; cx.lineWidth = 5; cx.globalAlpha = 1 - p / 1.2;
+    rr(x - cs / 2 + 3, y - cs / 2 + 3, cs - 6, cs - 6, 10); cx.stroke(); cx.globalAlpha = 1;
+    if (!DEMO) hand(x + 10, y + 14 + Math.sin(t * 6) * 6, p < 0.2);
+  }
+  if (DEMO && demo.cursor) hand(demo.cursor.x + 10, demo.cursor.y + 14, demo.cursor.press);
+
+  // hint button
+  if (S.phase === 'play' || S.phase === 'intro') {
+    const b = UI.hint; cx.fillStyle = 'rgba(120,60,20,0.25)'; rr(b.x - b.w / 2, b.y - b.h / 2 + 5, b.w, b.h, 28); cx.fill();
+    cx.fillStyle = '#8ecae6'; rr(b.x - b.w / 2, b.y - b.h / 2, b.w, b.h, 28); cx.fill();
+    text('💡 HINT', b.x, b.y + 1, 21, '#073b4c');
+    cx.fillStyle = '#ffffffcc'; rr(30, 735, 260, 50, 25); cx.fill();
+    text(`🐱 ${S.cats.length}/${n} cats napping`, 160, 761, 20, '#7a3e1d', 800);
+  }
+
+  // fx
+  S.fx = S.fx.filter(p => t - p.t < p.life);
+  for (const p of S.fx) { const a = t - p.t, k = 1 - a / p.life; const x = p.x + p.vx * a, y = p.y + p.vy * a + 380 * a * a;
+    cx.globalAlpha = k; cx.fillStyle = p.color; if (p.kind === 'heart') { heartPath(x, y, 16); cx.fill(); } else { cx.beginPath(); cx.arc(x, y, 5, 0, Math.PI * 2); cx.fill(); } }
+  cx.globalAlpha = 1;
+
+  // overlays
+  if (S.phase === 'win') {
+    const a = clamp((t - S.phaseT - 0.4) / 0.4);
+    cx.globalAlpha = a; cx.fillStyle = '#fffaf3ee'; rr(70, 840 - 40 * a, 400, 90, 45); cx.fill();
+    text(['PURRFECT!', 'PAWSOME!', 'GENIUS!'][S.li % 3], W / 2, 885 - 40 * a, 40, '#e85d04'); cx.globalAlpha = 1;
+  }
+  if (S.phase === 'fail' || S.phase === 'end') overlayCard();
+}
+
+function overlayCard() {
+  const t = S.t, a = clamp((t - S.phaseT) / 0.4);
+  cx.fillStyle = `rgba(60,25,10,${0.6 * a})`; cx.fillRect(-200, -200, W + 400, H + 400);
+  cx.save(); cx.globalAlpha = a; const y0 = 200 + (1 - ease.out(a)) * 60;
+  cx.fillStyle = '#fffaf3'; rr(40, y0, 460, 560, 36); cx.fill();
+  if (S.phase === 'end') {
+    text('NAP CATS', W / 2, y0 + 70, 54, '#7a3e1d'); text('Logic Rooms', W / 2, y0 + 112, 24, '#b06a3b', 800);
+    for (let i = 0; i < 5; i++) drawCat(110 + i * 80, y0 + 215 + (i % 2) * 12, 74, CFG.furs[i], true, Math.sin(t * 4 + i) * 4);
+    text('1,000+ cozy puzzles', W / 2, y0 + 315, 30, '#7a3e1d'); text('New daily puzzle • Collect 50 cats', W / 2, y0 + 355, 20, '#b06a3b', 800);
+    button('PLAY FREE', UI.cta.x, UI.cta.y - 200 + y0 - 200 + 140, UI.cta.w, UI.cta.h, '#fb8500', '#fff', t);
+  } else {
+    text('Out of lives!', W / 2, y0 + 80, 44, '#e63946');
+    drawCat(W / 2, y0 + 210, 140, CFG.furs[1], true, 0);
+    text(`${S.cats.length}/${S.lvl.n} cats placed`, W / 2, y0 + 320, 26, '#7a3e1d', 800);
+    button('TRY AGAIN', UI.retry.x, y0 + 400, UI.retry.w, UI.retry.h, '#8ecae6', '#073b4c', t);
+    button('GET FULL GAME', UI.cta.x, y0 + 495, UI.cta.w, 76, '#fb8500', '#fff', t);
+  }
+  cx.restore();
+}
+
+/* ---------- update ---------- */
+function update() {
+  if (S.phase === 'intro' && S.t - S.phaseT > 0.55) S.phase = 'play';
+  if (S.phase === 'win' && S.t - S.phaseT > 1.9) {
+    if (S.li + 1 < CFG.levels.length) loadLevel(S.li + 1); else { S.phase = 'end'; S.phaseT = S.t; }
+  }
+  if (DEMO) demo.step();
+}
+
+/* ---------- input ---------- */
+function toLogical(e) { return [(e.clientX * devicePixelRatio - offX) / scale, (e.clientY * devicePixelRatio - offY) / scale]; }
+function inBtn(x, y, b, dy = 0) { return Math.abs(x - b.x) < b.w / 2 && Math.abs(y - (b.y + dy)) < b.h / 2; }
+function cta() { try { if (window.mraid && mraid.open) { mraid.open(CFG.storeUrl); return; } } catch (e) {} window.open(CFG.storeUrl, '_blank'); }
+cv.addEventListener('pointerdown', e => {
+  audio(); if (DEMO) return;
+  const [x, y] = toLogical(e);
+  if (S.phase === 'end') { cta(); return; }
+  if (S.phase === 'fail') { if (Math.abs(x - UI.retry.x) < UI.retry.w / 2 && Math.abs(y - 600) < UI.retry.h / 2) { loadLevel(S.li); } else cta(); return; }
+  if (inBtn(x, y, UI.hint)) { useHint(); return; }
+  const c = Math.floor((x - S.bx) / S.cell), r = Math.floor((y - S.by) / S.cell);
+  if (r >= 0 && c >= 0 && r < S.lvl.n && c < S.lvl.n) tapCell(r, c);
+});
+
+/* ---------- demo script (scripted autoplay for ad capture) ---------- */
+const demo = {
+  cursor: null, queue: [], i: 0, t0: 0,
+  plan() {
+    // per level: list of [delay, kind, r, c]; wrong taps target a free non-solution cell at that moment
+    const L = S.li, n = S.lvl.n, sol = S.lvl.sol;
+    const size = new Array(n).fill(0); for (const row of S.lvl.reg) for (const v of row) size[v]++;
+    const order = [...Array(n).keys()].sort((a, b) => size[S.lvl.reg[a][sol[a]]] - size[S.lvl.reg[b][sol[b]]]);
+    const q = [];
+    if (L === 0) { order.forEach((r, i) => { q.push([i === 0 ? 0.9 : 0.75, 'cat', r, sol[r]]); if (i === 1) q.push([0.6, 'wrong']); }); }
+    else if (L === 1) { order.forEach(r => q.push([0.42, 'cat', r, sol[r]])); }
+    else { order.slice(0, 3).forEach(r => q.push([0.55, 'cat', r, sol[r]])); q.push([0.9, 'wrong'], [0.8, 'wrong'], [1.0, 'wrong']); }
+    this.queue = q; this.i = 0; this.t0 = S.t; this.moveFrom = this.cursor ? { ...this.cursor } : { x: 470, y: 860 };
+  },
+  step() {
+    if (S.phase === 'intro') { this.queue = null; return; }
+    if (S.phase !== 'play') { if (this.cursor) this.cursor.press = false; return; }
+    if (!this.queue) this.plan();
+    const a = this.queue[this.i]; if (!a) return;
+    if (a[1] === 'wrong' && a[2] === undefined) {
+      const n = S.lvl.n; outer: for (let r = n - 1; r >= 0; r--) for (let c = 0; c < n; c++) if (!S.marks[r][c] && !catAt(r, c) && S.lvl.sol[r] !== c) { a[2] = r; a[3] = c; break outer; }
+    }
+    const [x, y] = cellCenter(a[2], a[3]), k = clamp((S.t - this.t0) / a[0]);
+    const m = ease.out(clamp(k / 0.7)); this.cursor = { x: this.moveFrom.x + (x - this.moveFrom.x) * m, y: this.moveFrom.y + (y - this.moveFrom.y) * m, press: k > 0.8 };
+    if (k >= 1) { tapCell(a[2], a[3]); this.i++; this.t0 = S.t; this.moveFrom = { x, y }; }
+  },
+};
+
+/* ---------- loop ---------- */
+function resize() {
+  const dpr = devicePixelRatio || 1; cv.width = innerWidth * dpr; cv.height = innerHeight * dpr;
+  cv.style.width = innerWidth + 'px'; cv.style.height = innerHeight + 'px';
+  scale = Math.min(cv.width / W, cv.height / H); offX = (cv.width - W * scale) / 2; offY = (cv.height - H * scale) / 2;
+}
+addEventListener('resize', resize); resize();
+loadLevel(0);
+let last = performance.now();
+function frame(now) { S.t += Math.min(0.05, (now - last) / 1000); last = now; update(); render(); requestAnimationFrame(frame); }
+if (CAP) { window.__advance = dt => { S.t += dt; update(); render(); }; render(); } else requestAnimationFrame(frame);
+
+window.__game = { state: S,
+  // render one awake cat to a transparent PNG (used for ad end cards)
+  catPNG: (i, px = 340) => { const c2 = document.createElement('canvas'); c2.width = c2.height = px; const real = cx;
+    cx = c2.getContext('2d'); try { drawCat(px / 2, px * 0.56, px * 0.9, CFG.furs[i], true, 0); } finally { cx = real; }
+    return c2.toDataURL('image/png'); }, level: i => loadLevel(i - 1), solve: () => { for (let r = 0; r < S.lvl.n; r++) if (!catAt(r, S.lvl.sol[r])) tapCell(r, S.lvl.sol[r]); } };
+})();
+</script>
+</body>
+</html>
