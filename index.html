@@ -1,0 +1,355 @@
+<!doctype html>
+<!-- PROTOTYPE - NOT FOR PRODUCTION (prototypes/game-3d-research/orbit-lock) -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+<title>Orbit Lock</title>
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #0b1020; color: #fff;
+    font-family: system-ui, -apple-system, "Segoe UI", sans-serif; touch-action: none; user-select: none; -webkit-user-select: none; }
+  #c { display: block; width: 100%; height: 100%; }
+  #hud { position: fixed; top: 0; left: 0; right: 0; display: flex; justify-content: space-between; align-items: center;
+    padding: 14px 16px; pointer-events: none; }
+  #hud .pill { background: rgba(255,255,255,.08); border: 1px solid rgba(255,255,255,.12); border-radius: 999px;
+    padding: 6px 14px; font-weight: 700; letter-spacing: .04em; font-size: 14px; }
+  #reset { pointer-events: auto; cursor: pointer; color: #fff; font: inherit; font-size: 18px; width: 38px; height: 38px;
+    border-radius: 50%; background: rgba(255,255,255,.08); border: 1px solid rgba(255,255,255,.12); }
+  #hint { position: fixed; bottom: 28px; left: 0; right: 0; text-align: center; font-size: 16px; font-weight: 600;
+    opacity: .85; pointer-events: none; padding: 0 16px; transition: opacity .3s; }
+  #toast { position: fixed; top: 22%; left: 0; right: 0; text-align: center; font-size: 40px; font-weight: 900;
+    letter-spacing: .06em; pointer-events: none; opacity: 0; transform: scale(.8); transition: opacity .25s, transform .25s;
+    text-shadow: 0 4px 24px rgba(255,201,77,.6); color: #ffd36b; }
+  #toast.show { opacity: 1; transform: scale(1); }
+  #hand { position: fixed; font-size: 44px; pointer-events: none; display: none; margin: -10px 0 0 -22px;
+    animation: swipe 1.4s ease-in-out infinite; filter: drop-shadow(0 4px 8px rgba(0,0,0,.5)); }
+  @keyframes swipe { 0% { transform: translateX(-50px); opacity: 0; } 15% { opacity: 1; } 85% { opacity: 1; } 100% { transform: translateX(50px); opacity: 0; } }
+  #end { position: fixed; inset: 0; display: none; flex-direction: column; align-items: center; justify-content: center;
+    gap: 14px; background: rgba(8,10,24,.82); backdrop-filter: blur(6px); text-align: center; padding: 16px; }
+  #end h1 { margin: 0; font-size: 44px; letter-spacing: .05em; color: #ffd36b; }
+  #end p { margin: 0 0 8px; opacity: .85; font-size: 17px; }
+  #end button { font: inherit; font-weight: 800; font-size: 20px; border: 0; border-radius: 999px; padding: 16px 44px; cursor: pointer; }
+  #play { background: linear-gradient(180deg, #ffd36b, #ff9f2e); color: #3a1d00; box-shadow: 0 8px 30px rgba(255,159,46,.45);
+    animation: pulse 1.2s ease-in-out infinite; }
+  #replay { background: transparent; color: #fff; border: 1px solid rgba(255,255,255,.3) !important; font-size: 16px !important; padding: 10px 28px !important; }
+  @keyframes pulse { 50% { transform: scale(1.06); } }
+</style>
+<script type="importmap">{ "imports": { "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js" } }</script>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="hud"><span class="pill" id="level">LEVEL 1</span><span class="pill" id="moves">MOVES 0</span><button id="reset" title="Restart level">↻</button></div>
+<div id="hint">Drag a ring to rotate it. Line up every gap with the exit.</div>
+<div id="toast"></div>
+<div id="hand">👆</div>
+<div id="end">
+  <h1>ORBIT LOCK</h1>
+  <p id="endText">You cracked every vault!</p>
+  <button id="play">PLAY NOW</button>
+  <button id="replay">Replay</button>
+</div>
+
+<script type="module">
+// PROTOTYPE - throwaway code. Hypothesis: "rotate nested rings to align gaps" is
+// understandable in <5 s without text and satisfying enough to finish 4 levels.
+import * as THREE from 'three';
+
+// ---------- tuning (hardcoded on purpose: prototype) ----------
+const STEPS = 12, STEP = Math.PI * 2 / STEPS;   // ring snaps to 30° increments
+const EXIT = Math.PI / 2;                        // exit direction (board-local +Y = away from player)
+const R0 = 1.15, DR = 0.72, TUBE = 0.2, CORE_R = 0.42;
+const COLORS = [0xff5d73, 0xffb23f, 0x4fd18b, 0x3fb6ff, 0xa77bff];
+// links: [source, target, factor] -> rotating source by k steps also rotates target by factor*k
+const LEVELS = [
+  { rings: 2, links: [],                                  scramble: [[0, 4], [1, -3]] },
+  { rings: 3, links: [[2, 1, 1]],                         scramble: [[0, 5], [2, 3], [1, -2]], intro: 'LINKED!' },
+  { rings: 4, links: [[0, 1, -1], [3, 2, 1]],             scramble: [[1, 4], [0, 3], [3, -5], [2, 2]], intro: 'REVERSE LINK!' },
+  { rings: 5, links: [[0, 1, 1], [2, 3, -1], [4, 3, 1]],  scramble: [[3, 5], [4, 2], [1, -3], [2, 4], [0, -2]], intro: 'FINAL VAULT' },
+];
+
+// ---------- renderer / scene ----------
+const canvas = document.getElementById('c');
+const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x0b1020);
+const camera = new THREE.PerspectiveCamera(40, 1, 0.1, 100);
+scene.add(new THREE.HemisphereLight(0xbfd4ff, 0x1a1030, 0.9));
+const sun = new THREE.DirectionalLight(0xffffff, 1.8); sun.position.set(3, 6, 8); scene.add(sun);
+const board = new THREE.Group(); board.rotation.x = -0.75; scene.add(board);
+
+// ---------- state ----------
+let levelIdx = 0, levelRoot = null, rings = [], offsets = [], links = [], moves = 0;
+let state = 'play', winT = 0, drag = null, interacted = false, core = null, coreLight = null, burst = null, outerR = 0;
+let camDist = 14;
+
+const $ = (id) => document.getElementById(id);
+const mod = (a, n) => ((a % n) + n) % n;
+const target = (i) => EXIT + offsets[i] * STEP;
+const isSolved = () => offsets.every((o) => mod(o, STEPS) === 0);
+
+function disposeTree(o) {
+  o.traverse((c) => { c.geometry?.dispose(); if (c.material) [].concat(c.material).forEach((m) => m.dispose()); });
+}
+
+function buildLevel(i) {
+  levelIdx = i; state = 'play'; winT = 0; drag = null; moves = 0;
+  if (levelRoot) { board.remove(levelRoot); disposeTree(levelRoot); }
+  if (burst) { board.remove(burst.points); disposeTree(burst.points); burst = null; }
+  levelRoot = new THREE.Group(); board.add(levelRoot);
+  const L = LEVELS[i];
+  links = L.links; offsets = new Array(L.rings).fill(0); rings = [];
+  outerR = R0 + (L.rings - 1) * DR;
+
+  // base plate + rim
+  const base = new THREE.Mesh(new THREE.CircleGeometry(outerR + 0.6, 96),
+    new THREE.MeshStandardMaterial({ color: 0x141a33, roughness: 0.9 }));
+  base.position.z = -0.28; levelRoot.add(base);
+  const rim = new THREE.Mesh(new THREE.TorusGeometry(outerR + 0.6, 0.08, 12, 128),
+    new THREE.MeshStandardMaterial({ color: 0x39427a, metalness: 0.6, roughness: 0.3 }));
+  rim.position.z = -0.25; levelRoot.add(rim);
+
+  // exit track (where all gaps must line up)
+  const len = outerR + 1.0;
+  const track = new THREE.Mesh(new THREE.PlaneGeometry(CORE_R * 2.3, len),
+    new THREE.MeshBasicMaterial({ color: 0x3a4a9a, transparent: true, opacity: 0.45 }));
+  track.position.set(Math.cos(EXIT) * len / 2, Math.sin(EXIT) * len / 2, -0.26); track.rotation.z = EXIT - Math.PI / 2;
+  levelRoot.add(track);
+  const arrow = new THREE.Mesh(new THREE.ConeGeometry(0.32, 0.55, 3),
+    new THREE.MeshStandardMaterial({ color: 0xffd36b, emissive: 0xffb23f, emissiveIntensity: 0.8 }));
+  arrow.position.set(Math.cos(EXIT) * (outerR + 0.95), Math.sin(EXIT) * (outerR + 0.95), 0);
+  arrow.rotation.z = EXIT - Math.PI / 2; arrow.userData.pulse = true;
+  levelRoot.add(arrow);
+
+  // core
+  core = new THREE.Mesh(new THREE.IcosahedronGeometry(CORE_R, 2),
+    new THREE.MeshStandardMaterial({ color: 0xffd36b, emissive: 0xffb23f, emissiveIntensity: 0.9, metalness: 0.2, roughness: 0.25, flatShading: true }));
+  coreLight = new THREE.PointLight(0xffc94d, 6, 6); core.add(coreLight);
+  levelRoot.add(core);
+
+  // rings
+  for (let k = 0; k < L.rings; k++) {
+    const r = R0 + k * DR;
+    const gap = 2 * Math.asin(Math.min(0.95, (CORE_R + 0.14) / r));  // gap wide enough for the core to pass
+    const color = COLORS[k % COLORS.length];
+    const mat = new THREE.MeshStandardMaterial({ color, metalness: 0.35, roughness: 0.3, emissive: color, emissiveIntensity: 0.08 });
+    const pivot = new THREE.Group();
+    const torus = new THREE.Mesh(new THREE.TorusGeometry(r, TUBE, 18, 120, Math.PI * 2 - gap), mat);
+    torus.rotation.z = gap / 2;                       // gap centred on local angle 0
+    pivot.add(torus);
+    for (const a of [gap / 2, -gap / 2]) {            // rounded caps at the gap ends
+      const cap = new THREE.Mesh(new THREE.SphereGeometry(TUBE, 16, 12), mat);
+      cap.position.set(Math.cos(a) * r, Math.sin(a) * r, 0); pivot.add(cap);
+    }
+    // small studs every 90° so the rotation reads clearly
+    for (let s = 1; s < 4; s++) {
+      const a = s * Math.PI / 2;
+      const stud = new THREE.Mesh(new THREE.SphereGeometry(0.07, 8, 6),
+        new THREE.MeshStandardMaterial({ color: 0xffffff, emissive: 0xffffff, emissiveIntensity: 0.4 }));
+      stud.position.set(Math.cos(a) * r, Math.sin(a) * r, TUBE * 0.9); pivot.add(stud);
+    }
+    pivot.rotation.z = EXIT;
+    levelRoot.add(pivot);
+    rings.push({ pivot, mat, r, vis: EXIT, glow: 0.08 });
+  }
+
+  // scramble with legal moves only -> always solvable
+  for (const [ri, k] of L.scramble) applyMove(ri, k);
+  if (isSolved()) applyMove(0, 3);
+
+  $('level').textContent = `LEVEL ${i + 1}`;
+  updateMoves();
+  $('end').style.display = 'none';
+  if (L.intro) showToast(L.intro, 1100);
+  $('hint').style.opacity = i === 0 ? 0.85 : 0;
+}
+
+function applyMove(ri, k) {
+  offsets[ri] += k;
+  for (const [s, d, f] of links) if (s === ri) offsets[d] += f * k;
+}
+const linkedTo = (ri) => links.filter(([s]) => s === ri);
+function updateMoves() { $('moves').textContent = `MOVES ${moves}`; }
+
+let toastTimer = 0;
+function showToast(text, ms = 900) {
+  const t = $('toast'); t.textContent = text; t.classList.add('show');
+  clearTimeout(toastTimer); toastTimer = setTimeout(() => t.classList.remove('show'), ms);
+}
+
+// ---------- audio (tiny synth, no assets) ----------
+let actx = null;
+function blip(freq, dur = 0.05, type = 'triangle', vol = 0.08) {
+  if (!actx) return;
+  const o = actx.createOscillator(), g = actx.createGain();
+  o.type = type; o.frequency.value = freq; g.gain.value = vol;
+  g.gain.exponentialRampToValueAtTime(0.0001, actx.currentTime + dur);
+  o.connect(g).connect(actx.destination); o.start(); o.stop(actx.currentTime + dur);
+}
+
+// ---------- input ----------
+const raycaster = new THREE.Raycaster(), ndc = new THREE.Vector2(), plane = new THREE.Plane(), hit = new THREE.Vector3();
+function boardPoint(e) {
+  const rect = canvas.getBoundingClientRect();
+  ndc.set(((e.clientX - rect.left) / rect.width) * 2 - 1, -((e.clientY - rect.top) / rect.height) * 2 + 1);
+  raycaster.setFromCamera(ndc, camera);
+  board.updateMatrixWorld();
+  const n = new THREE.Vector3(0, 0, 1).applyQuaternion(board.quaternion);
+  plane.setFromNormalAndCoplanarPoint(n, board.position);
+  if (!raycaster.ray.intersectPlane(plane, hit)) return null;
+  return board.worldToLocal(hit.clone());
+}
+
+canvas.addEventListener('pointerdown', (e) => {
+  if (!actx) { try { actx = new (window.AudioContext || window.webkitAudioContext)(); } catch {} }
+  if (state !== 'play') return;
+  const p = boardPoint(e); if (!p) return;
+  const rad = Math.hypot(p.x, p.y);
+  let best = -1, bestD = DR / 2 + 0.05;
+  rings.forEach((rg, i) => { const d = Math.abs(rad - rg.r); if (d < bestD) { bestD = d; best = i; } });
+  if (best < 0) return;
+  try { canvas.setPointerCapture(e.pointerId); } catch {}
+  drag = { ri: best, prev: Math.atan2(p.y, p.x), accum: 0, lastStep: 0 };
+  interacted = true; $('hand').style.display = 'none'; $('hint').style.opacity = 0;
+  blip(520, 0.04);
+});
+
+canvas.addEventListener('pointermove', (e) => {
+  if (!drag) return;
+  const p = boardPoint(e); if (!p) return;
+  const a = Math.atan2(p.y, p.x);
+  let d = a - drag.prev;
+  if (d > Math.PI) d -= Math.PI * 2; else if (d < -Math.PI) d += Math.PI * 2;
+  drag.accum += d; drag.prev = a;
+  const step = Math.round(drag.accum / STEP);
+  if (step !== drag.lastStep) { drag.lastStep = step; blip(700 + mod(step, STEPS) * 25, 0.03); navigator.vibrate?.(8); }
+});
+
+function endDrag() {
+  if (!drag) return;
+  const k = Math.round(drag.accum / STEP);
+  if (k !== 0) { applyMove(drag.ri, k); moves++; updateMoves(); }
+  drag = null;
+  if (isSolved()) { state = 'solving'; winT = 0; }
+}
+canvas.addEventListener('pointerup', endDrag);
+canvas.addEventListener('pointercancel', endDrag);
+
+$('reset').addEventListener('click', () => buildLevel(levelIdx));
+$('replay').addEventListener('click', () => buildLevel(0));
+$('play').addEventListener('click', () => {
+  // TODO playable-ad: mraid.open(storeUrl) / network-specific CTA call goes here.
+  showToast('STORE LINK', 900);
+});
+
+// ---------- win FX ----------
+function spawnBurst(pos) {
+  const N = 140, posArr = new Float32Array(N * 3), col = new Float32Array(N * 3), vel = [];
+  const c = new THREE.Color();
+  for (let i = 0; i < N; i++) {
+    posArr.set([pos.x, pos.y, pos.z], i * 3);
+    const a = Math.random() * Math.PI * 2, s = 2 + Math.random() * 4, up = Math.random() * 3;
+    vel.push(new THREE.Vector3(Math.cos(a) * s, Math.sin(a) * s, up));
+    c.setHex(COLORS[i % COLORS.length]); col.set([c.r, c.g, c.b], i * 3);
+  }
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.BufferAttribute(posArr, 3));
+  g.setAttribute('color', new THREE.BufferAttribute(col, 3));
+  const points = new THREE.Points(g, new THREE.PointsMaterial({ size: 0.16, vertexColors: true, transparent: true, depthWrite: false }));
+  board.add(points);
+  burst = { points, vel, t: 0 };
+}
+
+// ---------- loop ----------
+function resize() {
+  const w = innerWidth, h = innerHeight;
+  renderer.setSize(w, h, false); camera.aspect = w / h; camera.updateProjectionMatrix();
+}
+addEventListener('resize', resize); resize();
+
+const handPos = new THREE.Vector3();
+const clock = new THREE.Clock();
+function tick() {
+  const dt = Math.min(clock.getDelta(), 0.05), t = clock.elapsedTime;
+
+  // camera framing: fit the board in both portrait and landscape
+  const R = outerR + 0.9, tan = Math.tan(THREE.MathUtils.degToRad(camera.fov / 2));
+  const want = Math.max(R / (tan * camera.aspect), R / tan) * 1.02;
+  camDist += (want - camDist) * Math.min(1, dt * 4);
+  camera.position.set(0, -0.4, camDist); camera.lookAt(0, 0.35, 0);
+
+  // rings: follow drag, otherwise ease to snapped target
+  const linked = drag ? linkedTo(drag.ri) : [];
+  rings.forEach((rg, i) => {
+    let goal = target(i), live = false;
+    if (drag) {
+      if (i === drag.ri) { goal += drag.accum; live = true; }
+      const l = linked.find(([, d]) => d === i); if (l) { goal += l[2] * drag.accum; live = true; }
+    }
+    rg.vis = live ? goal : rg.vis + (goal - rg.vis) * Math.min(1, dt * 14);
+    rg.pivot.rotation.z = rg.vis;
+    const glowGoal = state !== 'play' ? 0.6 : live ? 0.45 : 0.08;
+    rg.glow += (glowGoal - rg.glow) * Math.min(1, dt * 10);
+    rg.mat.emissiveIntensity = rg.glow;
+  });
+
+  // pulse decorations
+  levelRoot?.children.forEach((c) => { if (c.userData.pulse) c.scale.setScalar(1 + Math.sin(t * 5) * 0.12); });
+  if (core && state === 'play') { core.rotation.x += dt * 0.6; core.rotation.y += dt * 0.9; core.scale.setScalar(1 + Math.sin(t * 3) * 0.04); }
+
+  // win sequence
+  if (state === 'solving') {
+    winT += dt;
+    if (winT > 0.3) { state = 'win'; winT = 0; blip(660, 0.12, 'sine', 0.1); setTimeout(() => blip(990, 0.25, 'sine', 0.1), 110); }
+  } else if (state === 'win') {
+    winT += dt;
+    const exitDist = outerR + 1.0, e = Math.min(1, winT / 0.7), ease = 1 - Math.pow(1 - e, 3);
+    core.position.set(Math.cos(EXIT) * exitDist * ease, Math.sin(EXIT) * exitDist * ease, Math.sin(e * Math.PI) * 0.8);
+    core.rotation.y += dt * 8;
+    if (winT >= 0.7 && !burst) {
+      spawnBurst(core.position); showToast('UNLOCKED!', 1000); navigator.vibrate?.([20, 40, 20]);
+      rings.forEach((rg) => { rg.mat.transparent = true; rg.mat.needsUpdate = true; });
+    }
+    if (winT > 0.7) {
+      const f = Math.min(1, (winT - 0.7) / 0.8);
+      rings.forEach((rg, i) => { rg.pivot.scale.setScalar(1 + f * (0.3 + i * 0.08)); rg.mat.opacity = 1 - f; });
+      core.material.opacity = 1;
+    }
+    if (winT > 1.9) {
+      if (levelIdx + 1 < LEVELS.length) buildLevel(levelIdx + 1);
+      else { state = 'end'; $('end').style.display = 'flex'; }
+    }
+  }
+
+  if (burst) {
+    burst.t += dt;
+    const p = burst.points.geometry.attributes.position;
+    burst.vel.forEach((v, i) => { v.z -= 6 * dt; p.array[i * 3] += v.x * dt; p.array[i * 3 + 1] += v.y * dt; p.array[i * 3 + 2] += v.z * dt; });
+    p.needsUpdate = true; burst.points.material.opacity = Math.max(0, 1 - burst.t / 1.2);
+  }
+
+  // tutorial hand on level 1 until first touch
+  if (levelIdx === 0 && !interacted && state === 'play') {
+    handPos.set(0, -outerR, 0); board.localToWorld(handPos); handPos.project(camera);
+    const h = $('hand'); h.style.display = 'block';
+    h.style.left = `${(handPos.x * 0.5 + 0.5) * innerWidth}px`; h.style.top = `${(-handPos.y * 0.5 + 0.5) * innerHeight}px`;
+  }
+
+  renderer.render(scene, camera);
+  requestAnimationFrame(tick);
+}
+
+buildLevel(0);
+tick();
+
+// debug hooks for automated checks (prototype only)
+window.__game = {
+  get state() { return { level: levelIdx + 1, state, moves, offsets: [...offsets] }; },
+  solve() { offsets = offsets.map(() => 0); state = 'solving'; winT = 0; },
+  level(n) { buildLevel(n - 1); },
+};
+</script>
+</body>
+</html>
