@@ -55,6 +55,21 @@ Video và công cụ quay: `production/marketing/mural-rush-3d-ads/`.
 - Ảnh: `screenshots/` (hướng dẫn màn 1, thắng màn 1, thắng màn 3, end card, dải frame của ad).
 - **Chưa kiểm tra:** cảm giác bấm trên điện thoại thật (bấm trúng robot nhờ raycast và vùng dự phòng 70px), fps trên Android tầm thấp, màn thua (Dock đầy) chưa được ép ra trong test tự động.
 
+
+## Bản ad A: chơi sai trước (2026-11-10)
+
+Học từ cách Sheep Jam quảng bá (nhân vật có cảm xúc, có nguy hiểm, HARD MODE, TEST YOUR IQ). Mở bằng `index.html?ad=fail` (`&rec=1` để quay).
+
+- 0 đến 2,4s: header "LEVEL 99 · HARD", nhãn đỏ "99% FAIL THIS LEVEL 😱".
+- Chơi ẩu: bấm liên tục cột trái, chứa các robot màu chưa tới lượt (trắng, đen, hồng). Chúng chạy hết vòng mà không bắn được gì, vào Dock. Dock 3/5 thì robot sợ (mắt to, run, giọt mồ hôi, 😱), viền màn hình nhấp nháy đỏ.
+- 7,1s: Dock tràn, rung camera, băng vàng đen "⚠ DOCK FULL! ⚠", robot khóc (😭, giọt nước mắt).
+- 7,8s: "Can YOU do better? 🤔". 9,2s: chớp trắng "↺ TRY AGAIN", chơi lại **đúng màn đó** (cùng seed, cùng hàng robot) theo cách đúng: "Outer layer first!".
+- 17,8s: "PERFECT! 🎉", sóng khối. 20s: end card "Only 1% beat Level 99. Can you?".
+- Màn "Level 99" dùng cùng tranh mèo nhưng xếp hàng khó hơn: màu chưa tới lượt chia thành robot nhỏ (6 sơn) và dồn vào cột trái. Băng chuyền 18 ô/giây cho nhịp nhanh.
+- Thêm cho mọi chế độ: robot có biểu cảm (vui khi bắn, sợ khi Dock gần đầy, khóc khi thua), xô sơn và vệt sơn quanh bàn.
+
+Video: `production/marketing/mural-rush-3d-ads/mural-rush-3d-ad-A-fail-23s.mp4` (quay bằng `AD=fail node rec.js ...`).
+
 ## Kết quả
 
 _(chờ test CPI, so với bản 2D)_
